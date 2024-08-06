@@ -7,7 +7,7 @@ TERMUX_PKG_VERSION=7.3.15
 TERMUX_PKG_SRCURL=https://downloads.python.org/pypy/pypy$_MAJOR_VERSION-v$TERMUX_PKG_VERSION-src.tar.bz2
 TERMUX_PKG_SHA256=6bb9537d85aa7ad13c0aad2e41ff7fd55080bc9b4d1361b8f502df51db816e18
 TERMUX_PKG_DEPENDS="gdbm, libandroid-posix-semaphore, libandroid-support, libbz2, libcrypt, libexpat, libffi, liblzma, libsqlite, ncurses, ncurses-ui-libs, openssl, zlib"
-TERMUX_PKG_BUILD_DEPENDS="bionic-host, tk, xorgproto"
+TERMUX_PKG_BUILD_DEPENDS="bionic-host, clang, make, pkg-config, python2, tk, xorgproto"
 TERMUX_PKG_RECOMMENDS="clang, make, pkg-config"
 TERMUX_PKG_SUGGESTS="pypy3-tkinter"
 TERMUX_PKG_BUILD_IN_SRC=true
@@ -32,29 +32,6 @@ termux_step_pre_configure() {
 	if $TERMUX_ON_DEVICE_BUILD; then
 		termux_error_exit "Package '$TERMUX_PKG_NAME' is not safe for on-device builds."
 	fi
-}
-
-__setup_host_pypy2() {
-	if [ "$TERMUX_ARCH_BITS" = "32" ]; then
-		termux_download \
-			"https://downloads.python.org/pypy/pypy2.7-v$TERMUX_PKG_VERSION-linux32.tar.bz2" \
-			"$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux32.tar.bz2 \
-			cb5c1da62a8ca31050173c4f6f537bc3ff316026895e5f1897b9bb526babae79
-		rm -rf "$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux32
-		tar -C "$TERMUX_PKG_CACHEDIR" -xf "$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux32.tar.bz2
-		export PATH="$TERMUX_PKG_CACHEDIR/pypy2.7-v$TERMUX_PKG_VERSION-linux32/bin:$PATH"
-	else
-		termux_download \
-			"https://downloads.python.org/pypy/pypy2.7-v$TERMUX_PKG_VERSION-linux64.tar.bz2" \
-			"$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux64.tar.bz2 \
-			e857553bdc4f25ba9670a5c173a057a9ff71262d5c5da73a6ddef9d7dc5d4f5e
-		rm -rf "$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux64
-		tar -C "$TERMUX_PKG_CACHEDIR" -xf "$TERMUX_PKG_CACHEDIR"/pypy2.7-v$TERMUX_PKG_VERSION-linux64.tar.bz2
-		export PATH="$TERMUX_PKG_CACHEDIR/pypy2.7-v$TERMUX_PKG_VERSION-linux64/bin:$PATH"
-	fi
-
-	pypy2 -m ensurepip --altinstall --no-default-pip
-	pypy2 -m pip install cparser cffi
 }
 
 __setup_proot() {
@@ -82,10 +59,140 @@ __setup_qemu_static_binaries() {
 	export PATH="$TERMUX_PKG_CACHEDIR/qemu-static-bin:$PATH"
 }
 
+__setup_docker_utils() {
+	mkdir -p "$TERMUX_PKG_CACHEDIR"/docker-utils
+	termux_download \
+		https://raw.githubusercontent.com/NotGlop/docker-drag/5413165a2453aa0bc275d7dc14aeb64e814d5cc0/docker_pull.py \
+		"$TERMUX_PKG_CACHEDIR"/docker-utils/docker_pull.py \
+		04e52b70c862884e75874b2fd229083fdf09a4bac35fc16fd7a0874ba20bd075
+	termux_download \
+		https://raw.githubusercontent.com/larsks/undocker/649f3fdeb0a9cf8aa794d90d6cc6a7c7698a25e6/undocker.py \
+		"$TERMUX_PKG_CACHEDIR"/docker-utils/undocker.py \
+		32bc122c53153abeb27491e6d45122eb8cef4f047522835bedf9b4b87877a907
+}
+
+__setup_termux_docker_rootfs() {
+	__setup_docker_utils
+
+	# Pick up host platform arch
+	local __pypy3_host_arch=""
+	if [ "$TERMUX_ARCH_BITS" = "32" ]; then
+		__pypy3_host_arch="i686"
+	else
+		__pypy3_host_arch="x86_64"
+	fi
+
+	# Get host platform rootfs tar if needed
+	if [ ! -f "$TERMUX_PKG_CACHEDIR/termux_termux-docker_$__pypy3_host_arch.tar" ]; then
+		(
+			cd "$TERMUX_PKG_CACHEDIR"
+			python docker-utils/docker_pull.py termux/termux-docker:$__pypy3_host_arch
+			mv termux_termux-docker.tar termux_termux-docker_$__pypy3_host_arch.tar
+		)
+	fi
+
+	# Download update-static-dns and static-dns-hosts.txt from older termux-docker commit
+	mkdir -p "$TERMUX_PKG_CACHEDIR"/termux-docker-utils
+	termux_download \
+		https://github.com/termux/termux-docker/raw/98af62205f4da832b71bb4de09cb8d6b17ceeaca/static-dns-hosts.txt \
+		"$TERMUX_PKG_CACHEDIR"/termux-docker-utils/static-dns-hosts.txt \
+		f5e28c8d37dc69e4876372cc05dcfd07aadc8499f5fa05bb6af1cfbff7cd656a
+	termux_download \
+		https://github.com/termux/termux-docker/raw/98af62205f4da832b71bb4de09cb8d6b17ceeaca/system/arm/bin/update-static-dns \
+		"$TERMUX_PKG_CACHEDIR"/termux-docker-utils/update-static-dns \
+		14b6ba13506dd90b691e5dbb84bf79ca155837dd43eb05c0e68fbe991c05ee5e
+
+	# Extract host platform rootfs tar
+	__pypy3_host_rootfs="$TERMUX_PKG_TMPDIR/host-termux-rootfs"
+	rm -rf "$__pypy3_host_rootfs".tmp
+	mkdir -p "$__pypy3_host_rootfs".tmp
+	cat "$TERMUX_PKG_CACHEDIR"/termux_termux-docker_$__pypy3_host_arch.tar | \
+		python "$TERMUX_PKG_CACHEDIR"/docker-utils/undocker.py -o "$__pypy3_host_rootfs".tmp
+	mkdir -p "$__pypy3_host_rootfs".tmp/"$TERMUX_PREFIX"/bin
+	mkdir -p "$__pypy3_host_rootfs".tmp/"$TERMUX_ANDROID_HOME"
+	cp "$TERMUX_PKG_CACHEDIR"/termux-docker-utils/static-dns-hosts.txt \
+		"$__pypy3_host_rootfs".tmp/system/etc/
+	cp "$TERMUX_PKG_CACHEDIR"/termux-docker-utils/update-static-dns \
+		"$__pypy3_host_rootfs".tmp/"$TERMUX_PREFIX"/bin/
+	cp "$TERMUX_PKG_CACHEDIR"/proot-bin/proot \
+		"$__pypy3_host_rootfs".tmp/"$TERMUX_PREFIX"/bin/
+	chmod +x "$__pypy3_host_rootfs".tmp/"$TERMUX_PREFIX"/bin/update-static-dns
+	mv "$__pypy3_host_rootfs".tmp "$__pypy3_host_rootfs"
+}
+
+__setup_termux_envs() {
+	__pypy3_termux_envs="
+ANDROID_DATA=/data
+ANDROID_ROOT=/system
+HOME=$TERMUX_ANDROID_HOME
+LANG=en_US.UTF-8
+PATH=$TERMUX_PREFIX/bin
+PREFIX=$TERMUX_PREFIX
+TMPDIR=$TERMUX_PREFIX/tmp
+TZ=UTC"
+
+	__pypy3_run_on_host="
+env -i
+PROOT_NO_SECCOMP=1
+$TERMUX_PKG_CACHEDIR/proot-bin/proot
+-b /proc -b /dev -b /sys
+-b $HOME
+-b /:/host-ubuntu-rootfs/
+-b $__pypy3_host_rootfs/:/host-termux-rootfs/
+-b /data/:/target-termux-rootfs/data/
+-b /system/:/target-termux-rootfs/system/
+-b $__pypy3_host_rootfs/$TERMUX_ANDROID_HOME:$TERMUX_ANDROID_HOME
+-w $TERMUX_PKG_TMPDIR
+-r $__pypy3_host_rootfs/
+"
+
+	__pypy3_run_on_target_from_builder="
+env -i
+PROOT_NO_SECCOMP=1
+$TERMUX_PKG_CACHEDIR/proot-bin/proot
+-b /proc -b /dev -b /sys
+-b $HOME
+-b $__pypy3_host_rootfs/$TERMUX_ANDROID_HOME:$TERMUX_ANDROID_HOME
+-b /:/host-ubuntu-rootfs/
+-b $__pypy3_host_rootfs/:/host-termux-rootfs/
+-b /data/:/target-termux-rootfs/data/
+-b /system/:/target-termux-rootfs/system/
+-w $TERMUX_PKG_TMPDIR
+-r /
+"
+
+	__pypy3_run_on_target_from_host="
+env -i
+PROOT_NO_SECCOMP=1
+$TERMUX_PKG_CACHEDIR/proot-bin/proot
+-b /proc -b /dev -b /sys
+-b $HOME
+-b /target-termux-rootfs/data/:/data/
+-b /target-termux-rootfs/system/:/system
+-b $TERMUX_ANDROID_HOME:$TERMUX_ANDROID_HOME
+-w $TERMUX_PKG_TMPDIR
+-r /target-termux-rootfs/
+"
+}
+
+__run_on_host_docker_rootfs() {
+	$__pypy3_run_on_host "$@"
+}
+
 termux_step_configure() {
-	__setup_host_pypy2
 	__setup_proot
 	__setup_qemu_static_binaries
+	__setup_docker_utils
+	__setup_termux_docker_rootfs
+	__setup_termux_envs
+
+	# Install deps on host termux rootfs
+	__run_on_host_docker_rootfs update-static-dns
+	__run_on_host_docker_rootfs apt update
+	__run_on_host_docker_rootfs apt upgrade -yq -o Dpkg::Options::=--force-confnew
+	__run_on_host_docker_rootfs apt update
+	__run_on_host_docker_rootfs apt install binutils clang ndk-sysroot ndk-multilib python2 -y
+	__run_on_host_docker_rootfs python2 -m pip install cffi pycparser
 
 	CFLAGS+=" -DBIONIC_IOCTL_NO_SIGNEDNESS_OVERLOAD=1"
 	# error: incompatible function pointer types passing 'Signed (*)(void *, const char *, XML_Encoding *)' (aka 'long (*)(void *, const char *, XML_Encoding *)') to parameter of type 'XML_UnknownEncodingHandler' (aka 'int (*)(void *, const char *, XML_Encoding *)') [-Wincompatible-function-pointer-types]
@@ -122,19 +229,15 @@ termux_step_make() {
 	fi
 
 	# (Cross) Translation
-	env -i \
+	__run_on_host_docker_rootfs \
 		-C "$TERMUX_PKG_SRCDIR"/pypy/goal \
-		PATH="$PATH" \
 		PYPY_USESSION_DIR="$TERMUX_PKG_SRCDIR/usession-dir" \
 		PROOT_TARGET="$PROOT_TARGET" \
 		TARGET_CFLAGS="$CFLAGS $CPPFLAGS" \
 		TARGET_LDFLAGS="$LDFLAGS" \
 		TARGET_CC="$CC" \
-		CC=gcc \
-		CFLAGS="-g -O0" \
-		PKG_CONFIG="/usr/bin/pkg-config" \
 		"${SETARCH32[@]}" \
-		pypy2 --jit off -X faulthandler -u ../../rpython/bin/rpython \
+		python2 -u ../../rpython/bin/rpython \
 				--platform=termux-"$TERMUX_ARCH" \
 				--source --no-compile -Ojit \
 				targetpypystandalone.py
